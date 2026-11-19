@@ -124,6 +124,13 @@ pip install reportlab
 ```bash
 python gui.py
 ```
+## 🌐 Live Demo
+
+🚀 **Try the Employee Payroll Management System online:**
+
+[Click Here to Open Live Application](https://employeepayrollsystem-jm34ljfjjmsjavtuqpoyil.streamlit.app/)
+
+The application provides employee management, payroll calculation, employee search, payslip generation and PDF download.
 
 ## 🎯 Project Objectives
 
