@@ -1,15 +1,11 @@
 import streamlit as st
-import sqlite3
 import pandas as pd
-from io import BytesIO
+import sqlite3
+import io
 from datetime import datetime
-
 from reportlab.lib.pagesizes import A4
-from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-)
-from reportlab.lib import colors
-from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.pdfgen import canvas
+
 
 # ==========================================
 # PAGE CONFIGURATION
@@ -22,123 +18,23 @@ st.set_page_config(
 )
 
 DB_NAME = "streamlit_payroll.db"
-TAX_RATE = 0.10
-REGULAR_HOURS = 160
-OVERTIME_MULTIPLIER = 1.5
 
 
 # ==========================================
-# CUSTOM EXCEPTION
-# ==========================================
-
-class InvalidSalaryDataException(Exception):
-    pass
-
-
-def validate_salary(amount):
-    if amount <= 0:
-        raise InvalidSalaryDataException(
-            "Salary must be greater than zero."
-        )
-
-
-# ==========================================
-# EMPLOYEE BASE CLASS
-# ==========================================
-
-class Employee:
-
-    def __init__(self, emp_id, name):
-        self.emp_id = emp_id
-        self.name = name
-
-    def calculate_pay(self):
-        raise NotImplementedError(
-            "Subclass must implement calculate_pay()."
-        )
-
-
-# ==========================================
-# SALARIED EMPLOYEE
-# ==========================================
-
-class SalariedEmployee(Employee):
-
-    def __init__(self, emp_id, name, salary):
-        super().__init__(emp_id, name)
-        validate_salary(salary)
-        self.salary = salary
-
-    def calculate_pay(self):
-        return self.salary
-
-
-# ==========================================
-# HOURLY EMPLOYEE
-# ==========================================
-
-class HourlyEmployee(Employee):
-
-    def __init__(self, emp_id, name, hours, rate):
-        super().__init__(emp_id, name)
-
-        if hours <= 0:
-            raise InvalidSalaryDataException(
-                "Hours must be greater than zero."
-            )
-
-        validate_salary(rate)
-
-        self.hours = hours
-        self.rate = rate
-
-    def calculate_pay(self):
-
-        regular = min(self.hours, REGULAR_HOURS)
-
-        overtime = max(
-            0, self.hours - REGULAR_HOURS
-        )
-
-        regular_pay = regular * self.rate
-
-        overtime_pay = (
-            overtime * self.rate * OVERTIME_MULTIPLIER
-        )
-
-        return regular_pay + overtime_pay
-
-
-# ==========================================
-# CONTRACT EMPLOYEE
-# ==========================================
-
-class ContractEmployee(Employee):
-
-    def __init__(self, emp_id, name, amount):
-        super().__init__(emp_id, name)
-        validate_salary(amount)
-        self.amount = amount
-
-    def calculate_pay(self):
-        return self.amount
-
-
-# ==========================================
-# DATABASE
+# DATABASE CONNECTION
 # ==========================================
 
 def get_connection():
     return sqlite3.connect(DB_NAME)
 
 
-def create_database():
+def create_table():
 
     conn = get_connection()
+    cursor = conn.cursor()
 
-    conn.execute("""
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS employees (
-
             emp_id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
             employee_type TEXT NOT NULL,
@@ -146,9 +42,38 @@ def create_database():
             hours REAL DEFAULT 0,
             rate REAL DEFAULT 0,
             contract_amount REAL DEFAULT 0
-
         )
     """)
+
+    conn.commit()
+    conn.close()
+
+
+create_table()
+
+
+# ==========================================
+# EMPLOYEE DATABASE FUNCTIONS
+# ==========================================
+
+def add_employee(employee):
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        INSERT INTO employees
+        (emp_id, name, employee_type, salary, hours, rate, contract_amount)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (
+        employee["emp_id"],
+        employee["name"],
+        employee["employee_type"],
+        employee["salary"],
+        employee["hours"],
+        employee["rate"],
+        employee["contract_amount"]
+    ))
 
     conn.commit()
     conn.close()
@@ -159,7 +84,7 @@ def get_all_employees():
     conn = get_connection()
 
     df = pd.read_sql_query(
-        "SELECT * FROM employees ORDER BY emp_id",
+        "SELECT * FROM employees",
         conn
     )
 
@@ -168,50 +93,45 @@ def get_all_employees():
     return df
 
 
-def add_employee(emp):
+def get_employee(emp_id):
 
     conn = get_connection()
+    cursor = conn.cursor()
 
-    conn.execute("""
-        INSERT INTO employees
-        (emp_id, name, employee_type, salary,
-         hours, rate, contract_amount)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (
-        emp["emp_id"],
-        emp["name"],
-        emp["employee_type"],
-        emp["salary"],
-        emp["hours"],
-        emp["rate"],
-        emp["contract_amount"]
-    ))
+    cursor.execute(
+        "SELECT * FROM employees WHERE emp_id = ?",
+        (emp_id,)
+    )
 
-    conn.commit()
+    employee = cursor.fetchone()
+
     conn.close()
 
+    return employee
 
-def update_employee(emp):
+
+def update_employee(emp_id, employee):
 
     conn = get_connection()
+    cursor = conn.cursor()
 
-    conn.execute("""
+    cursor.execute("""
         UPDATE employees
-        SET name=?,
-            employee_type=?,
-            salary=?,
-            hours=?,
-            rate=?,
-            contract_amount=?
-        WHERE emp_id=?
+        SET name = ?,
+            employee_type = ?,
+            salary = ?,
+            hours = ?,
+            rate = ?,
+            contract_amount = ?
+        WHERE emp_id = ?
     """, (
-        emp["name"],
-        emp["employee_type"],
-        emp["salary"],
-        emp["hours"],
-        emp["rate"],
-        emp["contract_amount"],
-        emp["emp_id"]
+        employee["name"],
+        employee["employee_type"],
+        employee["salary"],
+        employee["hours"],
+        employee["rate"],
+        employee["contract_amount"],
+        emp_id
     ))
 
     conn.commit()
@@ -221,9 +141,10 @@ def update_employee(emp):
 def delete_employee(emp_id):
 
     conn = get_connection()
+    cursor = conn.cursor()
 
-    conn.execute(
-        "DELETE FROM employees WHERE emp_id=?",
+    cursor.execute(
+        "DELETE FROM employees WHERE emp_id = ?",
         (emp_id,)
     )
 
@@ -235,119 +156,281 @@ def delete_employee(emp_id):
 # PAYROLL CALCULATION
 # ==========================================
 
-def create_employee(row):
+def calculate_payroll(employee):
 
-    if row["employee_type"] == "Salaried":
+    emp_type = employee["employee_type"]
 
-        return SalariedEmployee(
-            row["emp_id"],
-            row["name"],
-            row["salary"]
+    if emp_type == "Salaried":
+
+        gross_salary = employee["salary"]
+
+    elif emp_type == "Hourly":
+
+        hours = employee["hours"]
+        rate = employee["rate"]
+
+        regular_hours = min(hours, 160)
+        overtime_hours = max(hours - 160, 0)
+
+        gross_salary = (
+            regular_hours * rate
+            + overtime_hours * rate * 1.5
         )
 
-    elif row["employee_type"] == "Hourly":
+    elif emp_type == "Contract":
 
-        return HourlyEmployee(
-            row["emp_id"],
-            row["name"],
-            row["hours"],
-            row["rate"]
-        )
+        gross_salary = employee["contract_amount"]
 
-    elif row["employee_type"] == "Contract":
+    else:
 
-        return ContractEmployee(
-            row["emp_id"],
-            row["name"],
-            row["contract_amount"]
-        )
+        gross_salary = 0
 
-    raise ValueError("Unknown employee type")
+    # Demonstration tax rate: 10%
+    tax = gross_salary * 0.10
 
+    net_salary = gross_salary - tax
 
-def calculate_payroll(row):
-
-    employee = create_employee(row)
-
-    gross = employee.calculate_pay()
-
-    tax = gross * TAX_RATE
-
-    net = gross - tax
-
-    return gross, tax, net
+    return gross_salary, tax, net_salary
 
 
 # ==========================================
-# PDF PAYSLIP
+# VALIDATION
 # ==========================================
 
-def generate_pdf(row):
+def validate_employee(employee):
 
-    gross, tax, net = calculate_payroll(row)
+    if not employee["emp_id"]:
+        raise ValueError("Employee ID is required.")
 
-    buffer = BytesIO()
+    if not employee["name"]:
+        raise ValueError("Employee name is required.")
 
-    pdf = SimpleDocTemplate(
-        buffer,
-        pagesize=A4
+    emp_type = employee["employee_type"]
+
+    if emp_type == "Salaried":
+
+        if employee["salary"] <= 0:
+            raise ValueError("Salary must be greater than zero.")
+
+    elif emp_type == "Hourly":
+
+        if employee["hours"] <= 0:
+            raise ValueError("Working hours must be greater than zero.")
+
+        if employee["rate"] <= 0:
+            raise ValueError("Hourly rate must be greater than zero.")
+
+    elif emp_type == "Contract":
+
+        if employee["contract_amount"] <= 0:
+            raise ValueError("Contract amount must be greater than zero.")
+
+    else:
+
+        raise ValueError("Invalid employee type.")
+
+
+# ==========================================
+# BULK DATASET IMPORT
+# ==========================================
+
+def import_employee_dataset(uploaded_file):
+
+    try:
+
+        filename = uploaded_file.name.lower()
+
+        if filename.endswith(".csv"):
+
+            data = pd.read_csv(uploaded_file)
+
+        elif filename.endswith(".xlsx"):
+
+            data = pd.read_excel(uploaded_file)
+
+        else:
+
+            return None, ["Only CSV and XLSX files are supported."]
+
+        required_columns = [
+            "Employee ID",
+            "Name",
+            "Type",
+            "Salary",
+            "Hours",
+            "Rate",
+            "Contract Amount"
+        ]
+
+        if not all(col in data.columns for col in required_columns):
+
+            return None, [
+                "Dataset columns do not match the required format."
+            ]
+
+        imported = 0
+        errors = []
+
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        # Track duplicate IDs within the uploaded file
+        seen_ids = set()
+
+        for index, row in data.iterrows():
+
+            try:
+
+                emp_id = str(row["Employee ID"]).strip()
+                name = str(row["Name"]).strip()
+                emp_type = str(row["Type"]).strip().title()
+
+                if emp_id.lower() in ["", "nan", "none"]:
+                    raise ValueError("Employee ID is required.")
+
+                if name.lower() in ["", "nan", "none"]:
+                    raise ValueError("Employee name is required.")
+
+                if emp_id in seen_ids:
+                    raise ValueError("Duplicate Employee ID in uploaded file.")
+
+                seen_ids.add(emp_id)
+
+                def number(value):
+                    if pd.isna(value) or str(value).strip() == "":
+                        return 0.0
+                    return float(value)
+
+                salary = number(row["Salary"])
+                hours = number(row["Hours"])
+                rate = number(row["Rate"])
+                contract_amount = number(row["Contract Amount"])
+
+                employee = {
+                    "emp_id": emp_id,
+                    "name": name,
+                    "employee_type": emp_type,
+                    "salary": salary,
+                    "hours": hours,
+                    "rate": rate,
+                    "contract_amount": contract_amount
+                }
+
+                validate_employee(employee)
+
+                cursor.execute(
+                    "SELECT emp_id FROM employees WHERE emp_id = ?",
+                    (emp_id,)
+                )
+
+                if cursor.fetchone():
+                    raise ValueError("Employee ID already exists in database.")
+
+                cursor.execute("""
+                    INSERT INTO employees
+                    (emp_id, name, employee_type, salary, hours, rate, contract_amount)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    emp_id,
+                    name,
+                    emp_type,
+                    salary,
+                    hours,
+                    rate,
+                    contract_amount
+                ))
+
+                imported += 1
+
+            except Exception as e:
+
+                errors.append(
+                    f"Row {index + 2}: {str(e)}"
+                )
+
+        conn.commit()
+        conn.close()
+
+        return imported, errors
+
+    except Exception as e:
+
+        return None, [str(e)]
+
+
+# ==========================================
+# PDF PAYSLIP GENERATION
+# ==========================================
+
+def generate_payslip_pdf(employee):
+
+    gross, tax, net = calculate_payroll(employee)
+
+    buffer = io.BytesIO()
+
+    pdf = canvas.Canvas(buffer, pagesize=A4)
+
+    width, height = A4
+
+    pdf.setTitle("Employee Payslip")
+
+    pdf.setFont("Helvetica-Bold", 22)
+
+    pdf.drawCentredString(
+        width / 2,
+        height - 60,
+        "EMPLOYEE PAYSLIP"
     )
 
-    styles = getSampleStyleSheet()
+    pdf.setFont("Helvetica", 11)
 
-    elements = []
+    pdf.drawString(50, height - 110, "Employee Payroll Management System")
 
-    elements.append(
-        Paragraph(
-            "<b>EMPLOYEE PAYSLIP</b>",
-            styles["Title"]
-        )
+    pdf.drawString(50, height - 160, f"Employee ID: {employee['emp_id']}")
+
+    pdf.drawString(50, height - 185, f"Employee Name: {employee['name']}")
+
+    pdf.drawString(50, height - 210, f"Employee Type: {employee['employee_type']}")
+
+    pdf.drawString(
+        50,
+        height - 235,
+        f"Date: {datetime.now().strftime('%d-%m-%Y')}"
     )
 
-    elements.append(Spacer(1, 30))
+    pdf.line(50, height - 260, width - 50, height - 260)
 
-    details = [
-        ["Employee ID", row["emp_id"]],
-        ["Employee Name", row["name"]],
-        ["Employee Type", row["employee_type"]],
-        ["Gross Salary", f"Rs. {gross:,.2f}"],
-        ["Tax Deduction", f"Rs. {tax:,.2f}"],
-        ["Net Salary", f"Rs. {net:,.2f}"]
-    ]
+    pdf.setFont("Helvetica-Bold", 13)
 
-    table = Table(
-        details,
-        colWidths=[180, 230]
+    pdf.drawString(50, height - 290, "PAYROLL DETAILS")
+
+    pdf.setFont("Helvetica", 12)
+
+    pdf.drawString(50, height - 330, "Gross Salary")
+
+    pdf.drawRightString(width - 60, height - 330, f"Rs. {gross:,.2f}")
+
+    pdf.drawString(50, height - 365, "Tax (10%)")
+
+    pdf.drawRightString(width - 60, height - 365, f"Rs. {tax:,.2f}")
+
+    pdf.line(50, height - 385, width - 50, height - 385)
+
+    pdf.setFont("Helvetica-Bold", 14)
+
+    pdf.drawString(50, height - 420, "Net Salary")
+
+    pdf.drawRightString(width - 60, height - 420, f"Rs. {net:,.2f}")
+
+    pdf.setFont("Helvetica-Oblique", 10)
+
+    pdf.drawCentredString(
+        width / 2,
+        60,
+        "This is a computer-generated payslip."
     )
 
-    table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0),
-         colors.lightblue),
-
-        ("GRID", (0, 0), (-1, -1), 1,
-         colors.grey),
-
-        ("PADDING", (0, 0), (-1, -1), 12),
-
-        ("FONTNAME", (0, 0), (-1, -1),
-         "Helvetica"),
-
-        ("BACKGROUND", (0, -1), (-1, -1),
-         colors.lightgreen)
-    ]))
-
-    elements.append(table)
-
-    elements.append(Spacer(1, 30))
-
-    elements.append(
-        Paragraph(
-            "Thank you!",
-            styles["Normal"]
-        )
-    )
-
-    pdf.build(elements)
+    pdf.save()
 
     buffer.seek(0)
 
@@ -355,194 +438,101 @@ def generate_pdf(row):
 
 
 # ==========================================
-# DATABASE INITIALIZATION
+# SIDEBAR NAVIGATION
 # ==========================================
 
-create_database()
+st.sidebar.title("💼 Employee Payroll")
 
+st.sidebar.write("Management System")
 
-# ==========================================
-# CUSTOM CSS
-# ==========================================
-
-st.markdown("""
-<style>
-
-.stApp {
-    background-color: #f1f5f9;
-}
-
-.main-title {
-    background-color: #172554;
-    padding: 25px;
-    border-radius: 12px;
-    text-align: center;
-    color: white;
-    font-size: 32px;
-    font-weight: bold;
-    margin-bottom: 25px;
-}
-
-.metric-card {
-    background-color: white;
-    padding: 20px;
-    border-radius: 12px;
-    text-align: center;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-}
-
-.stButton > button {
-    background-color: #2563eb;
-    color: white;
-    border-radius: 8px;
-    border: none;
-    padding: 8px 20px;
-}
-
-.stButton > button:hover {
-    background-color: #1d4ed8;
-    color: white;
-}
-
-</style>
-""", unsafe_allow_html=True)
-
-
-# ==========================================
-# SIDEBAR
-# ==========================================
-
-st.sidebar.title("💼 Payroll System")
-
-st.sidebar.markdown("---")
-
-page = st.sidebar.radio(
-
+menu = st.sidebar.radio(
     "Navigation",
-
     [
         "Dashboard",
         "Add Employee",
+        "View Employees",
         "Update Employee",
         "Delete Employee",
         "Search Employee",
-        "Generate Payslip"
+        "Generate Payslip",
+        "Import Dataset"
     ]
-
 )
 
 st.sidebar.markdown("---")
-
-st.sidebar.info(
-    "Employee Payroll Management System\n\n"
-    "Developed by Nisha"
-)
-
-
-# ==========================================
-# GET EMPLOYEE DATA
-# ==========================================
-
-df = get_all_employees()
+st.sidebar.caption("Developed by Nisha")
 
 
 # ==========================================
 # DASHBOARD
 # ==========================================
 
-if page == "Dashboard":
+if menu == "Dashboard":
 
-    st.markdown(
-        '<div class="main-title">'
-        'EMPLOYEE PAYROLL MANAGEMENT SYSTEM'
-        '</div>',
-        unsafe_allow_html=True
-    )
+    st.title("📊 Employee Payroll Dashboard")
 
-    total = len(df)
+    employees = get_all_employees()
 
-    payroll_total = 0
+    total_employees = len(employees)
 
-    if total > 0:
+    salaried_count = 0
+    hourly_count = 0
+    contract_count = 0
 
-        for _, row in df.iterrows():
+    total_payroll = 0
 
-            gross, tax, net = calculate_payroll(row)
+    for _, row in employees.iterrows():
 
-            payroll_total += gross
+        employee = row.to_dict()
 
-    salaried = (
-        len(df[df["employee_type"] == "Salaried"])
-        if total else 0
-    )
+        gross, tax, net = calculate_payroll(employee)
 
-    hourly = (
-        len(df[df["employee_type"] == "Hourly"])
-        if total else 0
-    )
+        total_payroll += net
 
-    contract = (
-        len(df[df["employee_type"] == "Contract"])
-        if total else 0
-    )
+        if row["employee_type"] == "Salaried":
+            salaried_count += 1
 
-    c1, c2, c3 = st.columns(3)
+        elif row["employee_type"] == "Hourly":
+            hourly_count += 1
 
-    c1.metric(
-        "Total Employees",
-        total
-    )
+        elif row["employee_type"] == "Contract":
+            contract_count += 1
 
-    c2.metric(
-        "Total Payroll",
-        f"Rs. {payroll_total:,.2f}"
-    )
+    col1, col2, col3 = st.columns(3)
 
-    c3.metric(
-        "Total Employee Types",
-        f"{salaried} / {hourly} / {contract}",
-        help="Salaried / Hourly / Contract"
-    )
+    col1.metric("Total Employees", total_employees)
 
-    st.markdown("### Employee Records")
+    col2.metric("Total Payroll", f"₹ {total_payroll:,.2f}")
 
-    if total > 0:
+    col3.metric("Salaried Employees", salaried_count)
 
-        display = df[[
-            "emp_id",
-            "name",
-            "employee_type"
-        ]].copy()
+    col4, col5 = st.columns(2)
 
-        display.columns = [
-            "Employee ID",
-            "Employee Name",
-            "Employee Type"
-        ]
+    col4.metric("Hourly Employees", hourly_count)
 
-        display["Gross Salary"] = [
-            f"Rs. {calculate_payroll(row)[0]:,.2f}"
-            for _, row in df.iterrows()
-        ]
+    col5.metric("Contract Employees", contract_count)
+
+    st.markdown("---")
+
+    st.subheader("Recent Employee Records")
+
+    if not employees.empty:
 
         st.dataframe(
-            display,
-            use_container_width=True,
-            hide_index=True
+            employees.tail(10),
+            use_container_width=True
         )
 
     else:
 
-        st.info(
-            "No employees found. Add your first employee!"
-        )
+        st.info("No employee records found. Add employees to get started.")
 
 
 # ==========================================
 # ADD EMPLOYEE
 # ==========================================
 
-elif page == "Add Employee":
+elif menu == "Add Employee":
 
     st.title("➕ Add New Employee")
 
@@ -552,7 +542,7 @@ elif page == "Add Employee":
 
         name = st.text_input("Employee Name")
 
-        employee_type = st.selectbox(
+        emp_type = st.selectbox(
             "Employee Type",
             ["Salaried", "Hourly", "Contract"]
         )
@@ -562,92 +552,59 @@ elif page == "Add Employee":
         rate = 0.0
         contract_amount = 0.0
 
-        if employee_type == "Salaried":
+        if emp_type == "Salaried":
 
             salary = st.number_input(
                 "Monthly Salary",
-                min_value=0.0,
-                value=50000.0
+                min_value=0.0
             )
 
-        elif employee_type == "Hourly":
+        elif emp_type == "Hourly":
 
             hours = st.number_input(
-                "Hours Worked",
-                min_value=0.0,
-                value=170.0
+                "Working Hours",
+                min_value=0.0
             )
 
             rate = st.number_input(
                 "Hourly Rate",
-                min_value=0.0,
-                value=200.0
+                min_value=0.0
             )
 
-        else:
+        elif emp_type == "Contract":
 
             contract_amount = st.number_input(
                 "Contract Amount",
-                min_value=0.0,
-                value=40000.0
+                min_value=0.0
             )
 
-        submit = st.form_submit_button(
-            "Save Employee"
-        )
+        submitted = st.form_submit_button("Add Employee")
 
-        if submit:
+        if submitted:
+
+            employee = {
+                "emp_id": emp_id.strip(),
+                "name": name.strip(),
+                "employee_type": emp_type,
+                "salary": salary,
+                "hours": hours,
+                "rate": rate,
+                "contract_amount": contract_amount
+            }
 
             try:
 
-                if not emp_id.strip():
-                    raise ValueError(
-                        "Employee ID is required."
-                    )
+                validate_employee(employee)
 
-                if not name.strip():
-                    raise ValueError(
-                        "Employee name is required."
-                    )
+                if get_employee(employee["emp_id"]):
 
-                if employee_type == "Salaried":
-                    validate_salary(salary)
-
-                elif employee_type == "Hourly":
-
-                    if hours <= 0:
-                        raise ValueError(
-                            "Hours must be greater than zero."
-                        )
-
-                    validate_salary(rate)
+                    st.error("Employee ID already exists.")
 
                 else:
-                    validate_salary(contract_amount)
 
-                emp = {
-                    "emp_id": emp_id.strip(),
-                    "name": name.strip(),
-                    "employee_type": employee_type,
-                    "salary": salary,
-                    "hours": hours,
-                    "rate": rate,
-                    "contract_amount": contract_amount
-                }
+                    add_employee(employee)
 
-                add_employee(emp)
-
-                st.success(
-                    "Employee added successfully!"
-                )
-
-                st.rerun()
-
-            except sqlite3.IntegrityError:
-
-                st.error(
-                    "Employee ID already exists."
-                )
+                    st.success("Employee added successfully!")
 
             except Exception as e:
 
@@ -655,329 +612,387 @@ elif page == "Add Employee":
 
 
 # ==========================================
-# UPDATE EMPLOYEE
+# VIEW EMPLOYEES
 # ==========================================
 
-elif page == "Update Employee":
+elif menu == "View Employees":
 
-    st.title("✏️ Update Employee")
+    st.title("👥 All Employees")
 
-    if df.empty:
+    employees = get_all_employees()
 
-        st.warning("No employee records available.")
+    if not employees.empty:
+
+        st.dataframe(
+            employees,
+            use_container_width=True
+        )
+
+        csv_data = employees.to_csv(index=False).encode("utf-8")
+
+        st.download_button(
+            "Download Employee Data (CSV)",
+            csv_data,
+            "employees.csv",
+            "text/csv"
+        )
 
     else:
 
+        st.info("No employees available.")
+
+
+# ==========================================
+# UPDATE EMPLOYEE
+# ==========================================
+
+elif menu == "Update Employee":
+
+    st.title("✏️ Update Employee")
+
+    employees = get_all_employees()
+
+    if employees.empty:
+
+        st.info("No employees available.")
+
+    else:
+
+        emp_ids = employees["emp_id"].tolist()
+
         selected_id = st.selectbox(
             "Select Employee ID",
-            df["emp_id"].tolist()
+            emp_ids
         )
 
-        old = df[
-            df["emp_id"] == selected_id
-        ].iloc[0]
+        employee = get_employee(selected_id)
 
-        types = [
-            "Salaried",
-            "Hourly",
-            "Contract"
-        ]
+        if employee:
 
-        with st.form("update_form"):
+            (
+                old_id,
+                old_name,
+                old_type,
+                old_salary,
+                old_hours,
+                old_rate,
+                old_contract
+            ) = employee
 
-            name = st.text_input(
-                "Employee Name",
-                value=old["name"]
-            )
+            with st.form("update_employee_form"):
 
-            employee_type = st.selectbox(
-                "Employee Type",
-                types,
-                index=types.index(old["employee_type"])
-            )
-
-            salary = 0.0
-            hours = 0.0
-            rate = 0.0
-            contract_amount = 0.0
-
-            if employee_type == "Salaried":
-
-                salary = st.number_input(
-                    "Monthly Salary",
-                    min_value=0.0,
-                    value=float(old["salary"])
-                    if old["employee_type"] == "Salaried"
-                    else 50000.0
+                name = st.text_input(
+                    "Employee Name",
+                    value=old_name
                 )
 
-            elif employee_type == "Hourly":
-
-                hours = st.number_input(
-                    "Hours Worked",
-                    min_value=0.0,
-                    value=float(old["hours"])
-                    if old["employee_type"] == "Hourly"
-                    else 170.0
+                emp_type = st.selectbox(
+                    "Employee Type",
+                    ["Salaried", "Hourly", "Contract"],
+                    index=["Salaried", "Hourly", "Contract"].index(old_type)
                 )
 
-                rate = st.number_input(
-                    "Hourly Rate",
-                    min_value=0.0,
-                    value=float(old["rate"])
-                    if old["employee_type"] == "Hourly"
-                    else 200.0
-                )
+                salary = old_salary
+                hours = old_hours
+                rate = old_rate
+                contract_amount = old_contract
 
-            else:
+                if emp_type == "Salaried":
 
-                contract_amount = st.number_input(
-                    "Contract Amount",
-                    min_value=0.0,
-                    value=float(old["contract_amount"])
-                    if old["employee_type"] == "Contract"
-                    else 40000.0
-                )
+                    salary = st.number_input(
+                        "Monthly Salary",
+                        min_value=0.0,
+                        value=float(old_salary)
+                    )
 
-            submit = st.form_submit_button(
-                "Update Employee"
-            )
+                elif emp_type == "Hourly":
 
-            if submit:
+                    hours = st.number_input(
+                        "Working Hours",
+                        min_value=0.0,
+                        value=float(old_hours)
+                    )
 
-                try:
+                    rate = st.number_input(
+                        "Hourly Rate",
+                        min_value=0.0,
+                        value=float(old_rate)
+                    )
 
-                    if not name.strip():
-                        raise ValueError(
-                            "Name cannot be empty."
-                        )
+                elif emp_type == "Contract":
 
-                    if employee_type == "Salaried":
-                        validate_salary(salary)
+                    contract_amount = st.number_input(
+                        "Contract Amount",
+                        min_value=0.0,
+                        value=float(old_contract)
+                    )
 
-                    elif employee_type == "Hourly":
+                submitted = st.form_submit_button("Update Employee")
 
-                        if hours <= 0:
-                            raise ValueError(
-                                "Hours must be greater than zero."
-                            )
+                if submitted:
 
-                        validate_salary(rate)
-
-                    else:
-                        validate_salary(contract_amount)
-
-                    emp = {
-                        "emp_id": selected_id,
+                    updated_employee = {
+                        "emp_id": old_id,
                         "name": name.strip(),
-                        "employee_type": employee_type,
+                        "employee_type": emp_type,
                         "salary": salary,
                         "hours": hours,
                         "rate": rate,
                         "contract_amount": contract_amount
                     }
 
-                    update_employee(emp)
+                    try:
 
-                    st.success(
-                        "Employee updated successfully!"
-                    )
+                        validate_employee(updated_employee)
 
-                    st.rerun()
+                        update_employee(
+                            old_id,
+                            updated_employee
+                        )
 
-                except Exception as e:
+                        st.success("Employee updated successfully!")
 
-                    st.error(str(e))
+                    except Exception as e:
+
+                        st.error(str(e))
 
 
 # ==========================================
 # DELETE EMPLOYEE
 # ==========================================
 
-elif page == "Delete Employee":
+elif menu == "Delete Employee":
 
     st.title("🗑️ Delete Employee")
 
-    if df.empty:
+    employees = get_all_employees()
 
-        st.warning("No employees available.")
+    if employees.empty:
+
+        st.info("No employees available.")
 
     else:
 
+        emp_ids = employees["emp_id"].tolist()
+
         selected_id = st.selectbox(
-            "Select Employee ID",
-            df["emp_id"].tolist()
+            "Select Employee ID to Delete",
+            emp_ids
         )
 
-        selected = df[
-            df["emp_id"] == selected_id
-        ].iloc[0]
+        employee = get_employee(selected_id)
 
-        st.write(
-            "Employee Name:",
-            selected["name"]
-        )
+        if employee:
 
-        st.write(
-            "Employee Type:",
-            selected["employee_type"]
-        )
+            st.warning(
+                f"Are you sure you want to delete {employee[1]}?"
+            )
 
-        confirm = st.checkbox(
-            "I confirm that I want to delete this employee."
-        )
-
-        if st.button("Delete Employee"):
-
-            if confirm:
+            if st.button("Confirm Delete"):
 
                 delete_employee(selected_id)
 
-                st.success(
-                    "Employee deleted successfully!"
-                )
+                st.success("Employee deleted successfully!")
 
                 st.rerun()
-
-            else:
-
-                st.warning(
-                    "Please confirm before deleting."
-                )
 
 
 # ==========================================
 # SEARCH EMPLOYEE
 # ==========================================
 
-elif page == "Search Employee":
+elif menu == "Search Employee":
 
     st.title("🔍 Search Employee")
 
-    search = st.text_input(
-        "Enter Employee ID or Name"
-    )
+    search_id = st.text_input("Enter Employee ID")
 
-    if search:
+    if st.button("Search"):
 
-        result = df[
-            df["emp_id"].str.contains(
-                search,
-                case=False,
-                na=False
-            )
-            |
-            df["name"].str.contains(
-                search,
-                case=False,
-                na=False
-            )
-        ]
+        employee = get_employee(search_id.strip())
 
-        if not result.empty:
+        if employee:
 
-            st.dataframe(
-                result,
-                use_container_width=True,
-                hide_index=True
-            )
+            st.success("Employee found!")
+
+            st.write("Employee ID:", employee[0])
+
+            st.write("Name:", employee[1])
+
+            st.write("Employee Type:", employee[2])
+
+            employee_data = {
+                "emp_id": employee[0],
+                "name": employee[1],
+                "employee_type": employee[2],
+                "salary": employee[3],
+                "hours": employee[4],
+                "rate": employee[5],
+                "contract_amount": employee[6]
+            }
+
+            gross, tax, net = calculate_payroll(employee_data)
+
+            st.write(f"Gross Salary: ₹ {gross:,.2f}")
+
+            st.write(f"Tax: ₹ {tax:,.2f}")
+
+            st.write(f"Net Salary: ₹ {net:,.2f}")
 
         else:
 
-            st.warning("Employee not found.")
+            st.error("Employee not found.")
 
 
 # ==========================================
 # GENERATE PAYSLIP
 # ==========================================
 
-elif page == "Generate Payslip":
+elif menu == "Generate Payslip":
 
-    st.title("📄 Generate Employee Payslip")
+    st.title("🧾 Generate Employee Payslip")
 
-    if df.empty:
+    employees = get_all_employees()
 
-        st.warning(
-            "Please add employees first."
-        )
+    if employees.empty:
+
+        st.info("No employees available.")
 
     else:
 
+        emp_ids = employees["emp_id"].tolist()
+
         selected_id = st.selectbox(
             "Select Employee",
-            df["emp_id"].tolist()
+            emp_ids
         )
 
-        row = df[
-            df["emp_id"] == selected_id
-        ].iloc[0]
+        employee = get_employee(selected_id)
 
-        gross, tax, net = calculate_payroll(row)
+        if employee:
 
-        st.markdown("---")
+            employee_data = {
+                "emp_id": employee[0],
+                "name": employee[1],
+                "employee_type": employee[2],
+                "salary": employee[3],
+                "hours": employee[4],
+                "rate": employee[5],
+                "contract_amount": employee[6]
+            }
 
-        st.subheader("Employee Information")
+            gross, tax, net = calculate_payroll(employee_data)
 
-        c1, c2 = st.columns(2)
+            st.subheader("Payroll Summary")
 
-        c1.write(
-            f"**Employee ID:** {row['emp_id']}"
-        )
+            col1, col2, col3 = st.columns(3)
 
-        c2.write(
-            f"**Employee Name:** {row['name']}"
-        )
+            col1.metric("Gross Salary", f"₹ {gross:,.2f}")
 
-        st.write(
-            f"**Employee Type:** {row['employee_type']}"
-        )
+            col2.metric("Tax", f"₹ {tax:,.2f}")
 
-        st.markdown("---")
+            col3.metric("Net Salary", f"₹ {net:,.2f}")
 
-        c1, c2, c3 = st.columns(3)
+            pdf_file = generate_payslip_pdf(employee_data)
 
-        c1.metric(
-            "Gross Salary",
-            f"Rs. {gross:,.2f}"
-        )
+            st.download_button(
+                label="Download Payslip PDF",
+                data=pdf_file,
+                file_name=f"Payslip_{selected_id}.pdf",
+                mime="application/pdf"
+            )
 
-        c2.metric(
-            "Tax Deduction",
-            f"Rs. {tax:,.2f}"
-        )
 
-        c3.metric(
-            "Net Salary",
-            f"Rs. {net:,.2f}"
-        )
+# ==========================================
+# IMPORT EMPLOYEE DATASET
+# ==========================================
 
-        pdf = generate_pdf(row)
+elif menu == "Import Dataset":
 
-        st.download_button(
+    st.title("📂 Import Employee Dataset")
 
-            label="📥 Download Payslip PDF",
+    st.write(
+        "Upload your complete employee dataset using a CSV or Excel file."
+    )
 
-            data=pdf,
+    st.info(
+        "Your file must contain: Employee ID, Name, Type, Salary, "
+        "Hours, Rate, Contract Amount."
+    )
 
-            file_name=f"Payslip_{selected_id}.pdf",
+    uploaded_file = st.file_uploader(
+        "Upload CSV or Excel File",
+        type=["csv", "xlsx"]
+    )
 
-            mime="application/pdf"
+    if uploaded_file is not None:
 
-        )
+        try:
 
-        st.success(
-            "Payslip generated successfully!"
-        )
+            if uploaded_file.name.lower().endswith(".csv"):
+
+                preview_data = pd.read_csv(uploaded_file)
+
+            else:
+
+                preview_data = pd.read_excel(uploaded_file)
+
+            st.subheader("Dataset Preview")
+
+            st.dataframe(
+                preview_data.head(10),
+                use_container_width=True
+            )
+
+            st.write(
+                f"Total rows in dataset: {len(preview_data)}"
+            )
+
+            if st.button("Import All Employees"):
+
+                uploaded_file.seek(0)
+
+                imported, errors = import_employee_dataset(
+                    uploaded_file
+                )
+
+                if imported is not None:
+
+                    st.success(
+                        f"{imported} employees imported successfully!"
+                    )
+
+                    if errors:
+
+                        st.warning("Some rows could not be imported:")
+
+                        for error in errors:
+
+                            st.write("•", error)
+
+                    elif imported == 0:
+
+                        st.info("No new employee records were imported.")
+
+                else:
+
+                    st.error("Import failed.")
+
+                    for error in errors:
+
+                        st.write(error)
+
+        except Exception as e:
+
+            st.error(f"Unable to read file: {str(e)}")
 
 
 # ==========================================
 # FOOTER
 # ==========================================
 
-st.markdown("---")
+st.sidebar.markdown("---")
 
-st.markdown(
-    "<center>Employee Payroll Management System | "
-    "Developed by Nisha</center>",
-    unsafe_allow_html=True
+st.sidebar.caption(
+    "Employee Payroll Management System | Python + Streamlit + SQLite"
 )
